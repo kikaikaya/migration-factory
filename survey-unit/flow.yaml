@@ -1,0 +1,618 @@
+# =============================================================
+# 移行工場・分析ユニット — レガシー現状調査フロー（flowsmith 定義）
+# =============================================================
+# 実行: flowsmith をインストールした Claude Code で
+#   /flowsmith-run survey-unit/flow.yaml
+# （paths.SRC を調査対象リポジトリに書き換えてから実行）
+#
+# 設計原則:
+#   1. 文書の印象ではなく、実際の資産（コード/設定/ライブラリ/SQL）だけを根拠にする
+#   2. 棚卸し → 分類 → 依存抽出 → 影響判断 の順を崩さない（根拠なしに影響を語らない）
+#   3. すべての行に evidence（証拠パス）と confidence（fact / inferred）を付ける。
+#      資産から確認できないことは needs_confirm=yes として残す（推定を事実と書かない）
+#   4. 成果物はデータ（CSV）。報告書はデータから派生する最終ビューにすぎない
+# =============================================================
+
+flow:
+  id: legacy_survey
+  name: レガシー現状調査（分析ユニット）
+  version: 1
+  goal: |
+    対象レガシーシステムの As-Is を「分析可能・再利用可能なデータ」として確立する。
+    成果物（CSV データ群 + 二層報告書）は、移行方針の判断・影響範囲の特定・
+    概算見積りの根拠資料として、アーキテクトと PM が直接利用する。
+    すべての結論は資産上の証拠に紐づいていなければならず、
+    確認できないことは「確認事項」として明示的に残すこと自体が成果である。
+
+paths:
+  SRC: ./target-repo          # ★調査対象リポジトリに書き換える
+  OUT: ./survey-out
+
+defaults:
+  max_rounds: 3
+  max_asks: 2
+
+steps:
+
+  # ---------------------------------------------------------
+  # 0. 資産の有無確認 — 何が揃っていて何が欠けているか
+  # ---------------------------------------------------------
+  - id: asset_check
+    type: make
+    title: 資産の有無確認
+    brief: |
+      調査対象 ${SRC} に対し、調査に必要な資産が揃っているかを確認し、
+      契約書 data-dictionary.md の「00-asset-check」スキーマで CSV に記録する。
+
+      確認する資産種別: ソースコード（Java 等）/ 画面資源（JSP/HTML/JS/CSS）/
+      バッチ・シェル / 設定ファイル / ライブラリ（jar 等）/ ビルド定義 /
+      DB 資料（DDL/SQL）/ デプロイ・環境資料 / 設計書類。
+
+      各種別について 有 / 無 / 一部 を判定し、証拠パスを付ける。
+      「無」の資産は、それが欠けることで後続のどの調査が制限されるかを
+      limitation 列に書く。欠けていても調査は中止しない（範囲の明示が目的）。
+    refs:
+      - survey-unit/contracts/data-dictionary.md
+    inputs:
+      - id: source
+        path: ${SRC}/
+        note: 調査対象のルート
+    outputs:
+      - id: asset_check
+        path: ${OUT}/data/00-asset-check.csv
+    gates:
+      - exists: ${OUT}/data/00-asset-check.csv
+      - min_lines: 8
+
+  # ---------------------------------------------------------
+  # 1. 資産棚卸しと規模統計 — すべての分析の量的基線
+  # ---------------------------------------------------------
+  - id: asset_inventory
+    type: make
+    title: 資産棚卸しと規模統計
+    brief: |
+      ${SRC} 全体を走査し、ファイル単位の資産一覧と規模統計を作る。
+
+      1. 01-inventory.csv: 全ファイル（ビルド出力・VCS 管理ファイルは除外）を
+         1 行 1 ファイルで記録。言語・行数を必ず実測する（印象で書かない）。
+      2. 01-stats.csv: 言語別のファイル数・総行数を集計する。
+
+      この 2 ファイルは後続全ステップの母数になる。
+      後続の表の件数がここと食い違ったら、それは後続側の漏れである。
+    refs:
+      - survey-unit/contracts/data-dictionary.md
+    inputs:
+      - id: source
+        path: ${SRC}/
+    outputs:
+      - id: inventory
+        path: ${OUT}/data/01-inventory.csv
+      - id: stats
+        path: ${OUT}/data/01-stats.csv
+    gates:
+      - exists: ${OUT}/data/01-inventory.csv
+      - exists: ${OUT}/data/01-stats.csv
+      - min_lines: 10
+
+  # ---------------------------------------------------------
+  # 2. 実行ドメイン × レイヤー分類 — 資産を座標に置く
+  # ---------------------------------------------------------
+  - id: layer_map
+    type: make-check
+    title: 実行ドメイン×レイヤー分類
+    maker:
+      brief: |
+        01-inventory.csv の主要資産を、二軸で分類して 02-layer-map.csv を作る。
+
+        軸1 実行ドメイン: online-ui（画面・入力） / online-logic（業務処理・DB 更新） /
+                          batch（定時・ファイル・一括処理） / unknown
+        軸2 レイヤー: app（業務アプリ） / framework / library / language /
+                      runtime（APサーバ・実行環境） / database / os / infra
+
+        分類には必ず根拠（命名規則・配置・設定の記述など）を evidence に書き、
+        確信度を confidence に書く。**判断がつかないものを無理に分類しない**こと。
+        unknown のまま needs_confirm=yes で残すのが正しい挙動である。
+      refs:
+        - survey-unit/contracts/data-dictionary.md
+    checker:
+      brief: |
+        02-layer-map.csv を 01-inventory.csv と突き合わせて検査する。
+      viewpoints:
+        - id: S01
+          severity: high
+          rule: 主要資産（ソース/設定/ライブラリ/SQL/シェル）がすべて分類表に載っている（棚卸しとの対account が取れる）
+        - id: S02
+          severity: high
+          rule: 全行に evidence があり、根拠なしの分類が存在しない
+        - id: S03
+          severity: mid
+          rule: unknown 行が needs_confirm=yes として残されている（強引な分類をしていない）
+    pass_when: no_high_fail
+    inputs:
+      - id: inventory
+        path: ${OUT}/data/01-inventory.csv
+    outputs:
+      - id: layer_map
+        path: ${OUT}/data/02-layer-map.csv
+    gates:
+      - exists: ${OUT}/data/02-layer-map.csv
+      - min_lines: 10
+
+  # ---------------------------------------------------------
+  # 3. 外部ライブラリ調査
+  # ---------------------------------------------------------
+  - id: library_inventory
+    type: make-check
+    title: 外部ライブラリ調査
+    maker:
+      brief: |
+        ビルド定義（pom.xml / build.gradle / build.xml / .classpath）と
+        lib ディレクトリ・アーカイブのマニフェストから、システムが依存する
+        外部ライブラリを 03-libraries.csv に列挙する。
+
+        各ライブラリ: 名称 / バージョン / 提供元 / OSS か商用か / 用途 /
+        どこから使われているか / 移行リスク（後継有無・EOL・互換性）。
+
+        ⚠ 権利関係が不明なライブラリ・商用ライブラリの内部を逆コンパイル等で
+        覗かない。外側（利用箇所・マニフェスト）から分かることだけを書き、
+        不明点は needs_confirm=yes とする。
+      refs:
+        - survey-unit/contracts/data-dictionary.md
+    checker:
+      brief: |
+        03-libraries.csv をビルド定義・lib ディレクトリと突き合わせて検査する。
+      viewpoints:
+        - id: L01
+          severity: high
+          rule: ビルド定義に宣言された依存と lib 配下の実体がすべて表に載っている
+        - id: L02
+          severity: high
+          rule: バージョン・提供元が不明な行は推測で埋めず needs_confirm=yes になっている
+        - id: L03
+          severity: mid
+          rule: 言語ランタイム・APサーバ関連のライブラリに移行リスクの記載がある
+    pass_when: no_high_fail
+    inputs:
+      - id: source
+        path: ${SRC}/
+      - id: layer_map
+        path: ${OUT}/data/02-layer-map.csv
+    outputs:
+      - id: libraries
+        path: ${OUT}/data/03-libraries.csv
+    gates:
+      - exists: ${OUT}/data/03-libraries.csv
+
+  # ---------------------------------------------------------
+  # 4. 依存関係の抽出 — 影響範囲判断の根拠データ
+  # ---------------------------------------------------------
+  - id: dependency_map
+    type: make-check
+    title: 依存関係の抽出
+    maker:
+      brief: |
+        資産間の依存関係を 04-dependencies.csv に抽出する。直接呼出だけでなく、
+        フレームワークや設定が作る**間接的な依存**を漏らさないことが本質。
+
+        対象とする依存タイプ（dep_type 列の語彙は契約書に従う）:
+        - call（メソッド呼出） / extends（継承） / implements（実装）
+        - dispatch（インタフェース・抽象経由の実体呼出）
+        - reflection（リフレクション） / annotation（注釈駆動）
+        - config（設定ファイルによる紐付け） / taglib（タグライブラリ）
+        - library（外部ライブラリ API 利用） / sql（DB オブジェクトへの依存）
+        - file（ファイルパス依存） / batch（ジョブ・シェル・プログラム連鎖）
+
+        全行に evidence（file:line または設定ファイルパス）必須。
+        追いきれなかった依存は 04-unresolved.csv に「何が・なぜ追えないか」を残す。
+        規模が大きい場合は、業務上の主要経路と横断的な共通部品を優先する。
+      refs:
+        - survey-unit/contracts/data-dictionary.md
+    checker:
+      brief: |
+        04-dependencies.csv / 04-unresolved.csv を検査する。
+      viewpoints:
+        - id: D01
+          severity: high
+          rule: 直接依存（call/extends/implements）と間接依存（config/annotation/reflection/taglib）の両方が含まれている
+        - id: D02
+          severity: high
+          rule: 全行に evidence があり、file:line または設定パスまで特定されている
+        - id: D03
+          severity: mid
+          rule: 未解決の依存が 04-unresolved.csv に理由付きで残されている（黙って捨てていない）
+    pass_when: no_high_fail
+    inputs:
+      - id: source
+        path: ${SRC}/
+      - id: layer_map
+        path: ${OUT}/data/02-layer-map.csv
+    outputs:
+      - id: dependencies
+        path: ${OUT}/data/04-dependencies.csv
+      - id: unresolved
+        path: ${OUT}/data/04-unresolved.csv
+    gates:
+      - exists: ${OUT}/data/04-dependencies.csv
+      - exists: ${OUT}/data/04-unresolved.csv
+      - min_lines: 10
+
+  # ---------------------------------------------------------
+  # 5. 画面側の調査
+  # ---------------------------------------------------------
+  - id: frontend_survey
+    type: make
+    title: 画面側の調査
+    brief: |
+      online-ui に分類された資産（JSP/HTML/CSS/JS 等）を調査し
+      05-frontend.csv を作る。1 行 = 1 画面（または画面部品）。
+
+      見るもの: 画面から後段への接続（form action / リンク / 非同期呼出の先の
+      URL・コントローラ）/ タグライブラリ等の部品利用 / 特定ブラウザ・
+      プラグイン依存（古いブラウザ前提の記述、組込みオブジェクト等）。
+
+      ブラウザ依存・プラグイン依存は移行リスクの典型なので、見つけたら
+      risk 列に必ず書く。接続先が追えない画面は needs_confirm=yes。
+    refs:
+      - survey-unit/contracts/data-dictionary.md
+    inputs:
+      - id: source
+        path: ${SRC}/
+      - id: layer_map
+        path: ${OUT}/data/02-layer-map.csv
+      - id: dependencies
+        path: ${OUT}/data/04-dependencies.csv
+    outputs:
+      - id: frontend
+        path: ${OUT}/data/05-frontend.csv
+    gates:
+      - exists: ${OUT}/data/05-frontend.csv
+
+  # ---------------------------------------------------------
+  # 6. 業務処理側の調査
+  # ---------------------------------------------------------
+  - id: backend_survey
+    type: make
+    title: 業務処理側の調査
+    brief: |
+      online-logic / batch に分類されたクラス群を調査し 06-backend.csv を作る。
+      1 行 = 1 クラス（規模が大きい場合は業務上の主要クラスと共通部品を優先）。
+
+      各クラス: 役割種別（入口 / 業務処理 / 検証 / DB アクセス / データ保持 /
+      共通部品 / フレームワーク拡張）/ 業務分類（命名・パッケージから推定）/
+      フレームワーク依存 / 外部ライブラリ依存 / DB アクセス有無。
+
+      共通部品（多数のクラスから参照されるもの）は置換影響が大きいため、
+      04-dependencies.csv の被参照数を根拠に common=yes を付ける。
+    refs:
+      - survey-unit/contracts/data-dictionary.md
+    inputs:
+      - id: source
+        path: ${SRC}/
+      - id: layer_map
+        path: ${OUT}/data/02-layer-map.csv
+      - id: dependencies
+        path: ${OUT}/data/04-dependencies.csv
+    outputs:
+      - id: backend
+        path: ${OUT}/data/06-backend.csv
+    gates:
+      - exists: ${OUT}/data/06-backend.csv
+
+  # ---------------------------------------------------------
+  # 7. フレームワーク・共通基盤の調査
+  # ---------------------------------------------------------
+  - id: framework_survey
+    type: make
+    title: フレームワーク・共通基盤の調査
+    brief: |
+      システムが乗っているフレームワーク（OSS / 自製の別を問わず）と
+      共通基盤部品を調査し 07-framework.csv を作る。
+
+      各対象: OSS か自製か / アプリ側からの利用形態（継承・呼出・設定駆動）/
+      利用箇所数（04-dependencies.csv を根拠に）/ 置換した場合の影響規模。
+
+      自製フレームワークはソースが見える場合のみ内部を調査する。
+      ソースが無い・権利不明の場合は利用側から見える振る舞いだけを記録し、
+      needs_confirm=yes とする（逆コンパイルしない）。
+    refs:
+      - survey-unit/contracts/data-dictionary.md
+    inputs:
+      - id: source
+        path: ${SRC}/
+      - id: dependencies
+        path: ${OUT}/data/04-dependencies.csv
+      - id: libraries
+        path: ${OUT}/data/03-libraries.csv
+    outputs:
+      - id: framework
+        path: ${OUT}/data/07-framework.csv
+    gates:
+      - exists: ${OUT}/data/07-framework.csv
+
+  # ---------------------------------------------------------
+  # 8. 言語・実行環境の影響調査
+  # ---------------------------------------------------------
+  - id: runtime_impact
+    type: make
+    title: 言語・実行環境の影響調査
+    brief: |
+      言語・実行環境のバージョンアップが現行コードに与える影響を調査し
+      08-runtime-impact.csv を作る。
+
+      見るもの（Java 系の例）:
+      - 現行のコンパイルレベル（ビルド定義の source/target）
+      - 旧名前空間 API の使用箇所（例: javax.* → jakarta.* 移行対象）
+      - 廃止予定・廃止済み API の使用箇所
+      - 実行環境（APサーバ）が提供する API への依存
+      - 外部ライブラリの新ランタイム互換性（03-libraries.csv と関連付け）
+
+      1 行 = 1 影響箇所。evidence は import 文・呼出箇所の file:line。
+      目標バージョンが未確定の場合は、確定している事実（現行版・使用 API）だけを
+      書き、目標依存の判断は needs_confirm=yes にする。
+    refs:
+      - survey-unit/contracts/data-dictionary.md
+    inputs:
+      - id: source
+        path: ${SRC}/
+      - id: libraries
+        path: ${OUT}/data/03-libraries.csv
+    outputs:
+      - id: runtime_impact
+        path: ${OUT}/data/08-runtime-impact.csv
+    gates:
+      - exists: ${OUT}/data/08-runtime-impact.csv
+
+  # ---------------------------------------------------------
+  # 9. DB・SQL の調査
+  # ---------------------------------------------------------
+  - id: db_survey
+    type: make-check
+    title: DB・SQL の調査
+    maker:
+      brief: |
+        データ層を調査し 2 つの CSV を作る。
+
+        1. 09-db.csv: SQL 文・ストアドプロシージャ・ファンクション・トリガ・
+           ビュー・シーケンス等の DB オブジェクト一覧。DB 製品固有の関数・
+           構文（移行時に書き換えが必要になるもの）を見つけたら specific 列に
+           記録し、risk を付ける。文字コードに関する設定も対象。
+        2. 09-crud.csv: プログラム（DAO 等）× テーブルの CRUD 対応表。
+           どのクラスがどのテーブルに C/R/U/D のどれを行うか。
+
+        evidence は SQL の所在（file:line / マッパー定義 / SQL ファイルパス）。
+      refs:
+        - survey-unit/contracts/data-dictionary.md
+    checker:
+      brief: |
+        09-db.csv / 09-crud.csv をソース・SQL 資産と突き合わせて検査する。
+      viewpoints:
+        - id: B01
+          severity: high
+          rule: SQL を発行する箇所（DAO/マッパー/SQL ファイル）が CRUD 表に網羅されている
+        - id: B02
+          severity: high
+          rule: DB 製品固有の関数・構文が specific 列に根拠付きで列挙されている
+        - id: B03
+          severity: mid
+          rule: ストアド・トリガ等の DB 内ロジックの有無が明記されている（無いなら無いと書く）
+    pass_when: no_high_fail
+    inputs:
+      - id: source
+        path: ${SRC}/
+      - id: dependencies
+        path: ${OUT}/data/04-dependencies.csv
+    outputs:
+      - id: db
+        path: ${OUT}/data/09-db.csv
+      - id: crud
+        path: ${OUT}/data/09-crud.csv
+    gates:
+      - exists: ${OUT}/data/09-db.csv
+      - exists: ${OUT}/data/09-crud.csv
+
+  # ---------------------------------------------------------
+  # 10. OS・ビルド・デプロイ・環境依存の調査
+  # ---------------------------------------------------------
+  - id: platform_survey
+    type: make
+    title: OS・ビルド・デプロイ・環境依存の調査
+    brief: |
+      実行基盤への依存点を調査し 10-platform.csv を作る。1 行 = 1 依存点。
+
+      見るもの: シェル・バッチ起動スクリプト / ハードコードされたファイルパス /
+      OS コマンド呼出 / 環境変数 / 文字コード・改行コード前提 /
+      ビルド方式（ツール・コンパイル指定）/ デプロイ構成（設定から推測できる範囲）。
+
+      方針: 稼働環境を当てることが目的ではない（配置先は要件の問題）。
+      ここで取るのは**環境を変えたときに壊れる箇所のデータ**である。
+      設定から推測できないことは深追いせず needs_confirm=yes で残す。
+    refs:
+      - survey-unit/contracts/data-dictionary.md
+    inputs:
+      - id: source
+        path: ${SRC}/
+    outputs:
+      - id: platform
+        path: ${OUT}/data/10-platform.csv
+    gates:
+      - exists: ${OUT}/data/10-platform.csv
+
+  # ---------------------------------------------------------
+  # 11. 処理フローの追跡 — 動きとしての理解を最低1本証明する
+  # ---------------------------------------------------------
+  - id: flow_trace
+    type: make-check
+    title: 処理フローの追跡
+    maker:
+      brief: |
+        入口から出口までの完全な処理フローを**最低 1 本**（オンライン・バッチが
+        両方あるなら各 1 本）追跡し、次の 2 つを作る。
+
+        1. 11-flows.csv: フロー一覧（1 行 = 1 フロー。入口 / 経路概要 /
+           触る DB・ファイル / 直接呼出か設定駆動かの別）
+        2. flows/{flow_id}.md: 各フローの詳細。経路を Mermaid 図 +
+           ステップ表で記述。**業務の言葉**（何の業務がどう流れるか）と
+           **構造の言葉**（どの層のどのクラスを通るか）の両方で書く。
+
+        オンラインの典型: 画面 → 入口（URL 対応付け）→ 業務処理 → 共通部品 →
+        DB アクセス → DB → 応答。
+        バッチの典型: 起動契機 → 主処理 → 業務ロジック → DB/ファイル → 結果出力。
+
+        途中で追えなくなった場合は、追えた所まで書き、断点と理由を明記する。
+      refs:
+        - survey-unit/contracts/data-dictionary.md
+    checker:
+      brief: |
+        フロー詳細を 04-dependencies.csv と突き合わせて検査する。
+      viewpoints:
+        - id: F01
+          severity: high
+          rule: 入口から DB/ファイル/外部接続まで断絶なく追跡された完全なフローが最低 1 本ある
+        - id: F02
+          severity: high
+          rule: 経路上の各ホップに evidence（クラス・設定の所在）がある
+        - id: F03
+          severity: mid
+          rule: 直接呼出と設定・フレームワーク駆動の呼出が区別されている
+    pass_when: no_high_fail
+    inputs:
+      - id: source
+        path: ${SRC}/
+      - id: dependencies
+        path: ${OUT}/data/04-dependencies.csv
+      - id: frontend
+        path: ${OUT}/data/05-frontend.csv
+      - id: backend
+        path: ${OUT}/data/06-backend.csv
+    outputs:
+      - id: flows
+        path: ${OUT}/data/11-flows.csv
+      - id: flow_docs
+        path: ${OUT}/flows/
+    gates:
+      - exists: ${OUT}/data/11-flows.csv
+
+  # ---------------------------------------------------------
+  # 12. 影響マトリクス — 調査をひとつの判断材料に束ねる
+  # ---------------------------------------------------------
+  - id: impact_matrix
+    type: make-check
+    title: 影響マトリクスの作成
+    maker:
+      brief: |
+        ここまでの全データを統合し、12-impact-matrix.csv を作る。
+        1 行 = 「何が（依存元）× 何の変化で（依存先・変化種別）× どう影響を受けるか」。
+
+        変化種別（action 列）: migrate（移行）/ replace（置換）/
+        upgrade（版上げ）/ none（影響調査不要。理由必須）/ confirm（要確認）。
+
+        各行: 影響内容 / リスク（high・mid・low）/ 根拠となるデータ行
+        （どの CSV のどの行か）/ 対応方針案。
+
+        ⚠ このマトリクスに、上流 CSV に存在しない事実を新規に登場させないこと。
+        ここは**判断の集約**であって新調査ではない。根拠が薄ければ action=confirm。
+      refs:
+        - survey-unit/contracts/data-dictionary.md
+    checker:
+      brief: |
+        12-impact-matrix.csv を上流 CSV 群と突き合わせて検査する。
+      viewpoints:
+        - id: M01
+          severity: high
+          rule: 全行の根拠が上流 CSV の実在する行に追跡できる（出所不明の影響記述がない）
+        - id: M02
+          severity: high
+          rule: リスク high の行に対応方針案が書かれている
+        - id: M03
+          severity: mid
+          rule: action=none の行に理由が明記されている
+    pass_when: no_high_fail
+    inputs:
+      - id: data_dir
+        path: ${OUT}/data/
+        note: ここまでの全 CSV
+    outputs:
+      - id: impact_matrix
+        path: ${OUT}/data/12-impact-matrix.csv
+    gates:
+      - exists: ${OUT}/data/12-impact-matrix.csv
+      - min_lines: 8
+
+  # ---------------------------------------------------------
+  # 13. 検収ゲート — 報告書を書く資格があるかの判定
+  # ---------------------------------------------------------
+  - id: consistency_gate
+    type: branch
+    title: データ整合の検収
+    arbiter:
+      brief: |
+        ${OUT}/data/ の全 CSV を横断して、次の観点で検収判定する。
+
+        1. 矛盾: 規模統計と各表の件数規模が大きく食い違っていないか
+        2. 根拠: evidence 欄が空・曖昧（「コードより」等）な行が放置されていないか
+        3. 事実と推定の区別: confidence=inferred であるべき行が fact になっていないか
+        4. 確認事項の透明性: 調査しきれなかった領域が needs_confirm として
+           可視化されているか（未調査の沈黙が一番危険）
+
+        問題がなければ yes。あれば no とし、reason に「どの CSV のどの行が
+        どの観点に反するか」を具体的に列挙する。
+    uses: [asset_inventory, layer_map, dependency_map, impact_matrix]
+    route:
+      yes: survey_report
+      no: impact_matrix
+    max_returns: 2
+    carry:
+      to: impact_matrix
+      keys: [reason]
+
+  # ---------------------------------------------------------
+  # 14. 二層報告書 — データから派生する最終ビュー
+  # ---------------------------------------------------------
+  - id: survey_report
+    type: make-check
+    title: 調査報告書の生成
+    maker:
+      brief: |
+        ${OUT}/data/ の全データから、二層構成の報告書を生成する。
+
+        1. report/00-summary.md（意思決定者向け・3 ページ以内）:
+           システムは何でできているか / 移行で何が問題になるか /
+           リスク上位とその影響 / 確認が必要な事項。技術用語を使わずに書く。
+        2. report/01-technical.md（技術者向け）:
+           全調査領域のサマリーと、根拠データ（CSV）への参照。
+           数値はすべて data/ の CSV から引用し、出所を明記する。
+        3. data/13-confirm-items.csv: 全 CSV の needs_confirm=yes 行を
+           集約した確認事項一覧（出所 CSV・行の特定情報付き）。
+
+        報告書に data/ に存在しない数値・事実を書いてはならない。
+      refs:
+        - survey-unit/contracts/data-dictionary.md
+    checker:
+      brief: |
+        報告書 2 部と確認事項一覧を data/ と突き合わせて検査する。
+      viewpoints:
+        - id: R01
+          severity: high
+          rule: 00-summary.md に技術用語（クラス名・API 名・ツール名）が含まれない
+        - id: R02
+          severity: high
+          rule: 報告書中の数値がすべて data/ の CSV から引用でき、出所が明記されている
+        - id: R03
+          severity: high
+          rule: 13-confirm-items.csv が全 CSV の needs_confirm=yes 行を漏れなく集約している
+    pass_when: no_high_fail
+    inputs:
+      - id: data_dir
+        path: ${OUT}/data/
+    outputs:
+      - id: summary
+        path: ${OUT}/report/00-summary.md
+      - id: technical
+        path: ${OUT}/report/01-technical.md
+      - id: confirm_items
+        path: ${OUT}/data/13-confirm-items.csv
+    gates:
+      - exists: ${OUT}/report/00-summary.md
+      - exists: ${OUT}/report/01-technical.md
+      - exists: ${OUT}/data/13-confirm-items.csv
+      - sections: ["リスク", "確認事項"]
