@@ -1,6 +1,6 @@
 {
-  "name": "legacy-migration-skills",
-  "description": "レガシーシステムの現状調査・マイグレーション評価を自動化する Skill 集",
+  "name": "migration-factory",
+  "description": "レガシーシステムの現状調査・マイグレーション評価を自動化するワークフロー・Skill 群",
   "version": "0.1.0",
   "author": {
     "name": "kikaikaya"
