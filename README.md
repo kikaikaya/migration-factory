@@ -14,7 +14,7 @@
 
 [survey-unit/](survey-unit/) は、現状調査の全 15 工程（資産棚卸し → 分類 → 依存抽出 →
 影響マトリクス → 検収 → 二層報告書）を 1 つの YAML で宣言したワークフロー定義。
-[flowsmith](https://github.com/KIKAIKAYA/flowsmith) エンジンで実行し、
+[flowsmith](https://github.com/kikaikaya/flowsmith) エンジンで実行し、
 **全成果物が列定義済みの CSV データ**として出る（報告書はその派生ビュー）。
 中断しても続きから再開できる。
 

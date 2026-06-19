@@ -1,6 +1,6 @@
 # survey-unit — レガシー現状調査の分析ユニット
 
-[flowsmith](https://github.com/KIKAIKAYA/flowsmith) で駆動する、レガシーシステム現状調査の
+[flowsmith](https://github.com/kikaikaya/flowsmith) で駆動する、レガシーシステム現状調査の
 ワークフロー定義。調査の全工程（資産棚卸し → 分類 → 依存抽出 → 影響判断 → 報告書）を
 1 つの YAML で宣言し、エージェントが順に実行する。
 

@@ -1,6 +1,6 @@
 # 実例: JPetStore 6 現状調査
 
-[survey-unit](../../survey-unit/) を [flowsmith](https://github.com/KIKAIKAYA/flowsmith) で
+[survey-unit](../../survey-unit/) を [flowsmith](https://github.com/kikaikaya/flowsmith) で
 実行した、そのままの出力。対象は [mybatis/jpetstore-6](https://github.com/mybatis/jpetstore-6)
 （Stripes + Spring + MyBatis + JSP / Apache-2.0 / 160 ファイル・15,007 行）。
 
